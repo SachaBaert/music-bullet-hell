@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Music Bullet Hell · Analysis Viewer</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='6' fill='%23ff3864'/></svg>" />
+  </head>
+  <body>
+    <header class="bar">
+      <div class="brand">
+        <span class="dot"></span>
+        <strong>Music Bullet Hell</strong>
+        <span class="muted">analysis viewer · milestone 1</span>
+      </div>
+      <div id="file" class="muted">no track loaded</div>
+      <label class="btn ghost" for="picker">Open audio…</label>
+      <input id="picker" type="file" accept="audio/*,.mp3,.wav,.ogg,.flac,.m4a" hidden />
+    </header>
+
+    <section id="stats" class="stats" hidden></section>
+
+    <main id="stage">
+      <div id="canvas-host"></div>
+      <div id="dropzone" class="dropzone">
+        <div class="dz-inner">
+          <div class="dz-icon">♪</div>
+          <h1>Drop an MP3 here</h1>
+          <p>Decoded and analyzed locally in your browser. Nothing is uploaded.</p>
+          <label class="btn" for="picker">or choose a file</label>
+          <div id="progress" class="progress" hidden>
+            <div class="progress-bar"><div id="progress-fill"></div></div>
+            <div id="progress-label" class="muted"></div>
+          </div>
+          <div id="error" class="error" hidden></div>
+        </div>
+      </div>
+    </main>
+
+    <footer class="controls" id="controls" hidden>
+      <button id="play" class="btn">▶ Play</button>
+      <span id="time" class="mono">0:00.000 / 0:00</span>
+      <span id="now" class="now"></span>
+      <span class="spacer"></span>
+      <label class="toggle"><input type="checkbox" id="click" /> Click track</label>
+      <label class="field">Zoom <input type="range" id="zoom" min="3" max="60" step="1" value="12" /> <span id="zoom-label" class="mono">12 s</span></label>
+      <label class="field">A/V offset <input type="number" id="offset" value="0" step="10" class="num" /> ms</label>
+      <button id="export" class="btn ghost">Export chart JSON</button>
+    </footer>
+    <div class="hint muted">Space play/pause · ←/→ seek 5 s · wheel or +/− zoom · C click track · click/drag to seek</div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

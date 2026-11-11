@@ -1,0 +1,22 @@
+{
+  "name": "music-bullet-hell",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Browser bullet hell where the music drives enemy patterns and player powers. Milestone 1: analysis viewer.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "pixi.js": "^8.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.0"
+  }
+}
