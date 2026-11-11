@@ -3,28 +3,36 @@ import { analyzeInWorker, sha256Hex } from './analysis/client';
 import { ClickTrack, Player } from './audio/player';
 import { chartToJSON, type AnalysisResult, type Chart } from './chart/types';
 import { Viewer } from './viewer/viewer';
+import { GameView } from './game/game';
+import { generatePlan, type Plan } from './game/patterns';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
 const player = new Player();
 const viewer = new Viewer();
+const game = new GameView();
 let current: AnalysisResult | null = null;
+let plan: Plan | null = null;
+type View = 'viewer' | 'game';
+let view: View = 'viewer';
 const click = new ClickTrack(player, () => current?.chart.beats ?? []);
 
 /** Exposed for debugging in the console: window.chart */
-declare global { interface Window { chart?: Chart } }
+declare global { interface Window { chart?: Chart; plan?: Plan } }
 
 async function main() {
   await viewer.init($('canvas-host'));
+  await game.init($('game-host'));
   viewer.onSeek = (t) => { player.seek(t); click.reset(); };
   viewer.onZoom = (w) => { ($('zoom') as HTMLInputElement).value = String(Math.round(w)); $('zoom-label').textContent = `${Math.round(w)} s`; };
   bindUI();
+  setView(location.hash === '#game' ? 'game' : 'viewer');
   requestAnimationFrame(frame);
 }
 
 function frame() {
   const t = player.visualTime();
-  viewer.update(t);
+  if (view === 'viewer') viewer.update(t); else game.update(t);
   click.update();
   updateTimeReadout(t);
   requestAnimationFrame(frame);
@@ -50,6 +58,7 @@ async function loadFile(file: File) {
     player.load(buffer);
     click.reset();
     viewer.setData(result);
+    buildPlan();
     renderStats(result.chart);
     $('file').textContent = file.name;
     $('controls').hidden = false;
@@ -63,6 +72,29 @@ async function loadFile(file: File) {
     e.hidden = false;
     e.textContent = `Could not load "${file.name}": ${err instanceof Error ? err.message : String(err)}`;
   }
+}
+
+function difficulty() { return Number(($('difficulty') as HTMLSelectElement).value) || 0.7; }
+
+function buildPlan() {
+  if (!current) return;
+  const t0 = performance.now();
+  plan = generatePlan(current.chart, { difficulty: difficulty() });
+  window.plan = plan;
+  game.setData(current.chart, plan);
+  console.info(`plan: ${plan.events.length} patterns, ${plan.bullets.count} bullets in ${(performance.now() - t0).toFixed(1)} ms`);
+}
+
+function setView(v: View) {
+  view = v;
+  document.body.dataset.view = v;
+  $('canvas-host').hidden = v !== 'viewer';
+  $('game-host').hidden = v !== 'game';
+  viewer.setActive(v === 'viewer');
+  game.setActive(v === 'game');
+  $('tab-viewer').classList.toggle('active', v === 'viewer');
+  $('tab-game').classList.toggle('active', v === 'game');
+  history.replaceState(null, '', v === 'game' ? '#game' : location.pathname + location.search);
 }
 
 function setProgress(f: number, stage: string) {
@@ -103,13 +135,25 @@ function bindUI() {
 
   $('export').addEventListener('click', exportChart);
 
+  for (const v of ['viewer', 'game'] as const) {
+    const tab = $(`tab-${v}`);
+    tab.addEventListener('click', () => { setView(v); tab.blur(); });
+  }
+  const debugBox = $('debug') as HTMLInputElement;
+  debugBox.addEventListener('change', () => { game.debug = debugBox.checked; });
+  $('difficulty').addEventListener('change', () => { buildPlan(); if (current) renderStats(current.chart); });
+
   window.addEventListener('keydown', (e) => {
-    if (!current || (e.target as HTMLElement).tagName === 'INPUT' && (e.target as HTMLInputElement).type === 'number') return;
+    const el = e.target as HTMLElement;
+    if (el.tagName === 'SELECT' || (el.tagName === 'INPUT' && (el as HTMLInputElement).type === 'number')) return;
+    if (e.key.toLowerCase() === 'g' && !e.ctrlKey && !e.metaKey) { setView(view === 'viewer' ? 'game' : 'viewer'); return; }
+    if (!current) return;
     if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
     else if (e.code === 'ArrowLeft') { player.seek(player.audioTime() - 5); click.reset(); }
     else if (e.code === 'ArrowRight') { player.seek(player.audioTime() + 5); click.reset(); }
     else if (e.key === '+' || e.key === '=') viewer.setZoom(viewer.zoom / 1.25);
     else if (e.key === '-') viewer.setZoom(viewer.zoom * 1.25);
+    else if (e.key.toLowerCase() === 'd' && view === 'game') { debugBox.checked = !debugBox.checked; debugBox.dispatchEvent(new Event('change')); }
     else if (e.key.toLowerCase() === 'c') { clickBox.checked = !clickBox.checked; clickBox.dispatchEvent(new Event('change')); }
   });
 }
@@ -168,6 +212,7 @@ function renderStats(c: Chart) {
   chip('onsets L/M/H', `${c.onsets.low.length}/${c.onsets.mid.length}/${c.onsets.high.length}`);
   chip('analysis', `${c.meta.analysisMs} ms`);
   chip('seed', c.meta.fileHash.slice(0, 8));
+  if (plan) chip('patterns / bullets', `${plan.events.length} / ${plan.bullets.count}`);
   const el = $('stats');
   el.innerHTML = chips.join('');
   el.hidden = false;

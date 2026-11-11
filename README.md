@@ -5,9 +5,19 @@ Bring your own MP3s: each song is analyzed locally, before playback, into a **ch
 
 **Live:** https://sachabaert.github.io/music-bullet-hell/
 
-## Status: milestone 1, the analysis viewer
+## Status: milestone 2, emitters
 
-Drop an audio file and you get:
+Two views share one loaded track (switch with the tabs or **G**):
+
+**Game** (milestone 2): the chart drives enemy emitters. No player yet; a static target dot marks where patterns aim.
+
+- **kick → rings** from the top emitter, **mids → aimed bursts or a spiral** (picked per section), **hats → one stream** on the song's regularized hat sub-rhythm
+- every pattern is scheduled backwards from its beat so it **arrives on the beat**; the target pulses on each arrival
+- density and speed follow the per-track **energy**; quiet parts are **breathers**
+- patterns are seeded with `chart.meta.fileHash`: the same file always plays the same way
+- **Debug curves** (**D**) draws energy/low/mid/high/novelty under the arena, with the beat grid, breathers, sections, drops and every scheduled arrival as a tick that crosses the now line when it lands
+
+**Viewer** (milestone 1): drop an audio file and you get
 
 - waveform with the **beat grid** (downbeats and bar numbers)
 - **energy** curve plus structural novelty
@@ -27,6 +37,10 @@ src/analysis/dsp.ts      FFT and small DSP helpers
 src/analysis/worker.ts   Worker entry; client.ts wraps it in a Promise
 src/audio/player.ts      Playback with the audio clock as master clock + click track
 src/viewer/viewer.ts     PixiJS renderer (overview strip + zoomable lanes, chunked rendering)
+src/game/patterns.ts     Pure, seeded pattern generator: Chart → Plan (events + bullets)
+src/game/grid.ts         Beat grid with 16th subdivisions, per-band rhythm masks
+src/game/rng.ts          Seeded PRNG streams derived from the file hash
+src/game/game.ts         PixiJS game view: emitters, bullets, target, debug overlay
 tests/                   Synthetic tracks with known ground truth (vitest)
 ```
 
@@ -42,12 +56,21 @@ tests/                   Synthetic tracks with known ground truth (vitest)
 8. Quiet: sustained low normalized energy
 9. **Fallback mode** when beat confidence is low: no grid, energy/sections only
 
+### Pattern generation (milestone 2)
+
+Bullets move in straight lines, so a bullet's position is a pure function of song time: `p(t) = p0 + v·(t − t0)`.
+The generator picks the **arrival** time first (a 16th-note grid step, or an onset in fallback mode) and derives the spawn time
+from the distance and speed. The game view just asks "which bullets are alive at t?" each frame, so seeking and pausing need no simulation.
+
+Per section, each band gets a **rhythm mask**: how often each 16th position in the bar carries an onset of that band.
+Steps that recur in ≥ 25–30 % of bars form the band's sub-rhythm; energy decides how many of them (strongest first) actually fire.
+
 ## Develop
 
 ```bash
 npm install
 npm run dev     # http://localhost:5173/music-bullet-hell/
-npm test        # analysis tests on synthetic tracks
+npm test        # analysis + pattern tests on synthetic tracks
 npm run build
 ```
 

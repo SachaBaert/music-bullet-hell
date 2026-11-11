@@ -88,6 +88,11 @@ export class Viewer {
     this.layout();
   }
 
+  /** Stop rendering while hidden (the game view shares the page). */
+  setActive(on: boolean) {
+    if (on) { this.app.start(); this.app.resize(); } else this.app.stop();
+  }
+
   get zoom() { return this.windowSec; }
   setZoom(windowSec: number) {
     const w = Math.min(60, Math.max(3, windowSec));
