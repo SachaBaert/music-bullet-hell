@@ -5,6 +5,7 @@ import { chartToJSON, type AnalysisResult, type Chart } from './chart/types';
 import { Viewer } from './viewer/viewer';
 import { GameView } from './game/game';
 import { generatePlan, type Plan } from './game/patterns';
+import { GAME_KEYS } from './game/input';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -75,11 +76,12 @@ async function loadFile(file: File) {
 }
 
 function difficulty() { return Number(($('difficulty') as HTMLSelectElement).value) || 0.7; }
+function densityMul() { const v = Number(($('density') as HTMLInputElement).value); return Number.isFinite(v) && v > 0 ? v : 1; }
 
 function buildPlan() {
   if (!current) return;
   const t0 = performance.now();
-  plan = generatePlan(current.chart, { difficulty: difficulty() });
+  plan = generatePlan(current.chart, { difficulty: difficulty(), density: densityMul() });
   window.plan = plan;
   game.setData(current.chart, plan);
   console.info(`plan: ${plan.events.length} patterns, ${plan.bullets.count} bullets in ${(performance.now() - t0).toFixed(1)} ms`);
@@ -142,25 +144,29 @@ function bindUI() {
   const debugBox = $('debug') as HTMLInputElement;
   debugBox.addEventListener('change', () => { game.debug = debugBox.checked; });
   $('difficulty').addEventListener('change', () => { buildPlan(); if (current) renderStats(current.chart); });
+  $('density').addEventListener('change', () => { buildPlan(); if (current) renderStats(current.chart); });
 
   window.addEventListener('keydown', (e) => {
     const el = e.target as HTMLElement;
     if (el.tagName === 'SELECT' || (el.tagName === 'INPUT' && (el as HTMLInputElement).type === 'number')) return;
     if (e.key.toLowerCase() === 'g' && !e.ctrlKey && !e.metaKey) { setView(view === 'viewer' ? 'game' : 'viewer'); return; }
     if (!current) return;
+    // in the game view, WASD/arrows/Shift/J/K/Z belong to the ship (src/game/input.ts)
+    if (view === 'game' && GAME_KEYS.has(e.code)) return;
     if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
-    else if (e.code === 'ArrowLeft') { player.seek(player.audioTime() - 5); click.reset(); }
-    else if (e.code === 'ArrowRight') { player.seek(player.audioTime() + 5); click.reset(); }
+    else if (e.code === 'ArrowLeft' || e.code === 'PageUp') { e.preventDefault(); player.seek(player.audioTime() - 5); click.reset(); }
+    else if (e.code === 'ArrowRight' || e.code === 'PageDown') { e.preventDefault(); player.seek(player.audioTime() + 5); click.reset(); }
+    else if (e.code === 'KeyR' && view === 'game') { player.seek(0); game.resetPlayer(0); click.reset(); }
     else if (e.key === '+' || e.key === '=') viewer.setZoom(viewer.zoom / 1.25);
     else if (e.key === '-') viewer.setZoom(viewer.zoom * 1.25);
-    else if (e.key.toLowerCase() === 'd' && view === 'game') { debugBox.checked = !debugBox.checked; debugBox.dispatchEvent(new Event('change')); }
+    else if (e.code === 'KeyI' && view === 'game') { debugBox.checked = !debugBox.checked; debugBox.dispatchEvent(new Event('change')); }
     else if (e.key.toLowerCase() === 'c') { clickBox.checked = !clickBox.checked; clickBox.dispatchEvent(new Event('change')); }
   });
 }
 
 function togglePlay() {
   if (!current) return;
-  if (!player.playing && player.audioTime() >= player.duration - 0.01) player.seek(0);
+  if (!player.playing && player.audioTime() >= player.duration - 0.01) { player.seek(0); game.resetPlayer(0); }
   player.toggle();
   click.reset();
   updatePlayButton();

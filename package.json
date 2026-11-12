@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Browser bullet hell where the music drives enemy patterns and player powers. Milestone 2: emitters.",
+  "description": "Browser bullet hell where the music drives enemy patterns and player powers. Milestone 3: player.",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",

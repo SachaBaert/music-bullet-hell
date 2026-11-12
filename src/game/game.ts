@@ -1,14 +1,16 @@
 /**
- * Game view (milestone 2): renders a Plan against the audio clock.
+ * Game view: renders a Plan against the audio clock, plus the player (milestone 3).
  *
- * No simulation state: every frame asks "which bullets are alive at song time t?" and places them
- * analytically (p0 + v·(t − t0)). Seeking, pausing and scrubbing therefore just work.
- * No player yet; a static target dot marks where patterns are aimed and pulses when one arrives.
+ * Bullets have no simulation state: every frame asks "which bullets are alive at song time t?" and
+ * places them analytically. The only runtime state is the player (PlayState): position, shots,
+ * graze/hit counters, and the aim each aimed event recorded when it spawned.
  */
 import { Application, Container, Graphics, Sprite, Text, type Texture } from 'pixi.js';
 import { sampleCurve, type Chart } from '../chart/types';
 import { lowerBound } from './grid';
-import { ARENA, KINDS, TARGET, streamEmitterAt, type EventKind, type Plan, type SectionStyle } from './patterns';
+import { Input } from './input';
+import { PLAYER, PlayState } from './play';
+import { ARENA, KINDS, TARGET, emittersOf, type EventKind, type Plan, type SectionStyle } from './patterns';
 
 const COLOR: Record<EventKind, number> = {
   ring: 0xff4d7a,   // kick / low
@@ -35,6 +37,13 @@ export class GameView {
   private emitterG = new Graphics();
   private bulletLayer = new Container();
   private targetG = new Graphics();
+  private playerG = new Graphics();
+  /** The hitbox goes above the bullets, so you can always see exactly where you are. */
+  private hitboxG = new Graphics();
+  private hudText!: Text;
+  private input!: Input;
+  private lastWall = performance.now();
+  play: PlayState | null = null;
   private frameG = new Graphics();
   private arenaMask = new Graphics();
   private debugText!: Text;
@@ -58,11 +67,16 @@ export class GameView {
     this.textures = KINDS.map((k) => this.bulletTexture(COLOR[k]));
     this.debugText = new Text({ text: '', style: { fontFamily: 'ui-monospace, Menlo, Consolas, monospace', fontSize: 11, fill: 0xc9d3e3, lineHeight: 15 } });
     this.debugText.position.set(10, 8);
+    this.hudText = new Text({ text: '', style: { fontFamily: 'ui-monospace, Menlo, Consolas, monospace', fontSize: 12, fill: 0xc9d3e3, fontWeight: '600', align: 'right' } });
+    this.hudText.anchor.set(1, 0);
+    this.hudText.alpha = 0.8;
+    this.hudText.position.set(ARENA.w - 10, 16);
+    this.input = new Input(host);
     this.arenaBg.rect(0, 0, ARENA.w, ARENA.h).fill(0x0d0f14);
     this.arenaMask.rect(0, 0, ARENA.w, ARENA.h).fill(0xffffff);
     this.frameG.rect(0, 0, ARENA.w, ARENA.h).stroke({ width: 1, color: 0x232a38 });
     const inner = new Container();
-    inner.addChild(this.arenaBg, this.debugG, this.debugLabels, this.emitterG, this.bulletLayer, this.targetG, this.debugText);
+    inner.addChild(this.arenaBg, this.debugG, this.debugLabels, this.emitterG, this.targetG, this.playerG, this.bulletLayer, this.hitboxG, this.hudText, this.debugText);
     inner.mask = this.arenaMask;
     this.root.addChild(inner, this.arenaMask, this.frameG);
     this.app.stage.addChild(this.root);
@@ -77,10 +91,15 @@ export class GameView {
     this.spawnOrder = plan.events.map((_, i) => i).sort((a, b) => plan.events[a].spawn - plan.events[b].spawn);
     this.spawnTimes = this.spawnOrder.map((i) => plan.events[i].spawn);
     this.arrivalTimes = plan.events.map((e) => e.arrival);
+    this.play = new PlayState(plan, chart);
   }
+
+  /** Restart hit/graze counters and the ship position (new run of the song). */
+  resetPlayer(t: number) { this.play?.reset(t); }
 
   /** Stop rendering while hidden (two WebGL views share the page). */
   setActive(on: boolean) {
+    this.input.enabled = on;
     if (on) { this.app.start(); this.app.resize(); } else this.app.stop();
   }
 
@@ -89,6 +108,7 @@ export class GameView {
     const s = Math.max(0.1, Math.min((w - 24) / ARENA.w, (h - 24) / ARENA.h));
     this.root.scale.set(s);
     this.root.position.set((w - ARENA.w * s) / 2, (h - ARENA.h * s) / 2);
+    if (this.input) this.input.scale = s;
   }
 
   private bulletTexture(color: number): Texture {
@@ -110,10 +130,17 @@ export class GameView {
       this.debugText.text = '';
       return;
     }
+    const now = performance.now();
+    const wallDt = Math.min(0.1, (now - this.lastWall) / 1000);
+    this.lastWall = now;
+    this.play!.step(t, this.input.read(), wallDt);
     if (this.debug) this.drawDebug(t); else { this.debugG.clear(); this.hideLabels(0); }
     this.drawEmitters(t);
     this.drawBullets(t);
-    this.drawTarget(t);
+    this.drawArrivals(t);
+    this.drawPlayer(t);
+    this.hudText.visible = !this.debug;
+    if (!this.debug) this.hudText.text = this.hud();
     this.debugText.visible = this.debug;
     if (this.debug) this.debugText.text = this.debugReadout(t);
   }
@@ -126,9 +153,13 @@ export class GameView {
 
   private drawBullets(t: number) {
     const b = this.plan!.bullets;
+    const play = this.play!;
     let n = 0;
     for (let i = lowerBound(b.t0, t - this.plan!.maxLife); i < b.count && b.t0[i] <= t; i++) {
-      if (t >= b.t1[i]) continue;
+      if (t >= b.t1[i] || play.removed[i]) continue;
+      play.pos(i, t);
+      const x = play.px, y = play.py;
+      if (x < -30 || x > ARENA.w + 30 || y < -30 || y > ARENA.h + 30) continue;
       const dt = t - b.t0[i];
       let sp = this.pool[n];
       if (!sp) {
@@ -140,7 +171,7 @@ export class GameView {
       n++;
       sp.visible = true;
       sp.texture = this.textures[b.kind[i]];
-      sp.position.set(b.x0[i] + b.vx[i] * dt, b.y0[i] + b.vy[i] * dt);
+      sp.position.set(x, y);
       const pop = Math.min(1, 0.35 + dt / 0.1); // short pop-in at the emitter
       sp.scale.set((b.r[i] / TEX_R) * pop);
     }
@@ -155,14 +186,18 @@ export class GameView {
 
     // resting emitters of the current section (dim)
     const hex = (x: number, y: number, r: number) => g.poly(Array.from({ length: 12 }, (_, i) => (i % 2 ? y : x) + r * (i % 2 ? Math.sin : Math.cos)(Math.floor(i / 2) * Math.PI / 3)));
-    hex(st.ringEmitter.x, st.ringEmitter.y, 14).stroke({ width: 2, color: COLOR.ring, alpha: 0.45 });
-    if (st.midStyle === 'burst') {
-      for (const e of st.midEmitters) g.poly([e.x, e.y - 11, e.x + 11, e.y, e.x, e.y + 11, e.x - 11, e.y]).stroke({ width: 2, color: COLOR.burst, alpha: 0.45 });
-    } else {
-      g.circle(st.spiral.x, st.spiral.y, 12).stroke({ width: 2, color: COLOR.spiral, alpha: 0.45 });
+    for (const e of emittersOf(st, t)) {
+      // flash white briefly when a player shot hits it
+      const hitAgo = t - (this.play!.emitterFlash.get(e.key) ?? -Infinity);
+      const flash = hitAgo >= 0 && hitAgo < 0.08;
+      const color = flash ? 0xffffff : COLOR[e.kind];
+      const alpha = flash ? 0.95 : 0.45;
+      const stroke = { width: flash ? 3 : 2, color, alpha };
+      if (e.kind === 'ring') hex(e.x, e.y, 14).stroke(stroke);
+      else if (e.kind === 'burst') g.poly([e.x, e.y - 11, e.x + 11, e.y, e.x, e.y + 11, e.x - 11, e.y]).stroke(stroke);
+      else if (e.kind === 'spiral') g.circle(e.x, e.y, 12).stroke(stroke);
+      else g.poly([e.x - 8, e.y - 6, e.x + 8, e.y - 6, e.x, e.y + 8]).stroke(stroke);
     }
-    const se = streamEmitterAt(st, t);
-    g.poly([se.x - 8, se.y - 6, se.x + 8, se.y - 6, se.x, se.y + 8]).stroke({ width: 2, color: COLOR.stream, alpha: 0.45 });
 
     // telegraph: charge up before a spawn, flash on it
     const lead = 0.35, tail = 0.15;
@@ -181,19 +216,74 @@ export class GameView {
     }
   }
 
-  private drawTarget(t: number) {
+  /**
+   * Debug: pulse where each pattern lands, on its beat. Aimed patterns land on the point the
+   * player was at when they spawned; spirals at their planned distance.
+   */
+  private drawArrivals(t: number) {
     const g = this.targetG.clear();
-    const plan = this.plan!;
-    // pulse for every pattern arriving now: this is the "lands on the beat" check
+    if (!this.debug) return;
+    const plan = this.plan!, play = this.play!;
     const win = 0.25;
     for (let i = lowerBound(this.arrivalTimes, t - win); i < this.arrivalTimes.length && this.arrivalTimes[i] <= t; i++) {
       const ev = plan.events[i];
+      if (!ev.aimed) continue;
       const f = (t - ev.arrival) / win;
+      const d = ev.dist * play.aimScale[i];
+      const x = ev.x + Math.cos(play.aimAngle[i]) * d, y = ev.y + Math.sin(play.aimAngle[i]) * d;
       const r = (ev.kind === 'ring' ? 26 : ev.kind === 'stream' ? 12 : 18) * (0.6 + f);
-      g.circle(TARGET.x, TARGET.y, r).stroke({ width: ev.kind === 'ring' ? 3 : 2, color: COLOR[ev.kind], alpha: 0.9 * (1 - f) });
+      g.circle(x, y, r).stroke({ width: ev.kind === 'ring' ? 3 : 2, color: COLOR[ev.kind], alpha: 0.8 * (1 - f) });
     }
-    g.circle(TARGET.x, TARGET.y, 9).stroke({ width: 1.5, color: 0xffffff, alpha: 0.35 });
-    g.circle(TARGET.x, TARGET.y, 4).fill(0xffffff);
+  }
+
+  private drawPlayer(t: number) {
+    const g = this.playerG.clear();
+    const p = this.play!;
+    // shots: short pale streaks
+    for (const s of p.shots) {
+      const len = 14;
+      const n = Math.hypot(s.vx, s.vy) || 1;
+      g.moveTo(s.x, s.y).lineTo(s.x - (s.vx / n) * len, s.y - (s.vy / n) * len);
+    }
+    if (p.shots.length) g.stroke({ width: 3, color: 0xfff3b0, alpha: 0.75 });
+
+    // effects
+    for (const f of p.fx) {
+      const age = t - f.t;
+      if (age < 0) continue;
+      if (f.kind === 'graze' && age < 0.18) {
+        const k = age / 0.18;
+        g.circle(f.x, f.y, 2 + 6 * k).stroke({ width: 1.5, color: 0xfff3b0, alpha: 0.8 * (1 - k) });
+      } else if (f.kind === 'hit' && age < 0.5) {
+        const k = age / 0.5;
+        g.circle(f.x, f.y, 10 + 70 * k).stroke({ width: 3, color: 0xff3864, alpha: 0.9 * (1 - k) });
+      } else if (f.kind === 'emitter' && age < 0.12) {
+        g.circle(f.x, f.y, 6 + 10 * (age / 0.12)).fill({ color: 0xffffff, alpha: 0.25 * (1 - age / 0.12) });
+      }
+    }
+
+    // ship: blinks while invulnerable
+    const inv = p.invulnerable;
+    const blink = inv && Math.floor(t * 16) % 2 === 0;
+    const alpha = blink ? 0.25 : 1;
+    const { x, y } = p;
+    g.poly([x, y - 13, x + 9, y + 9, x, y + 4, x - 9, y + 9]).fill({ color: 0x1b2230, alpha }).stroke({ width: 1.5, color: 0xf1f5ff, alpha });
+    // graze radius: faint all the time, clear in focus mode
+    g.circle(x, y, PLAYER.graze).stroke({ width: 1, color: 0xfff3b0, alpha: p.focus ? 0.5 : 0.13 });
+    // hitbox: tiny, always drawn (above the bullets); ringed in focus mode
+    const h = this.hitboxG.clear();
+    if (p.focus) h.circle(x, y, PLAYER.hitbox + 3).fill({ color: 0xff3864, alpha: 0.9 });
+    h.circle(x, y, PLAYER.hitbox).fill({ color: 0xffffff, alpha: p.focus ? 1 : 0.7 });
+
+    // graze meter along the bottom edge
+    const w = ARENA.w - 20;
+    g.rect(10, ARENA.h - 10, w, 4).fill({ color: 0xffffff, alpha: 0.08 });
+    g.rect(10, ARENA.h - 10, w * p.meter, 4).fill({ color: p.meter >= 1 ? 0xffd166 : 0xfff3b0, alpha: 0.85 });
+  }
+
+  private hud(): string {
+    const p = this.play!;
+    return [`HITS ${p.hits}`, `GRAZE ${p.grazes}  ${Math.round(p.meter * 100)}%`, `EMITTER HITS ${p.emitterHits}`].join('\n');
   }
 
   // ------------------------------------------------------------------ debug overlay
@@ -310,6 +400,7 @@ export class GameView {
       `hat   ${mask(st.masks.high)}`,
       `energy ${at(chart.curves.energy).toFixed(2)}  L ${at(chart.curves.low).toFixed(2)}  M ${at(chart.curves.mid).toFixed(2)}  H ${at(chart.curves.high).toFixed(2)}${breather ? '  BREATHER' : ''}`,
       `bullets ${String(this.visibleCount).padStart(4)} on screen · ${plan.bullets.count} total · ${plan.events.length} patterns`,
+      `player ${this.play!.x.toFixed(0)},${this.play!.y.toFixed(0)}${this.play!.focus ? ' focus' : ''}${this.play!.invulnerable ? ' INVULN' : ''} · hits ${this.play!.hits} · graze ${this.play!.grazes} (${Math.round(this.play!.meter * 100)}%) · emitter hits ${this.play!.emitterHits}`,
       `${chart.mode} · ${tempo} · difficulty ${plan.difficulty} · seed ${chart.meta.fileHash.slice(0, 8)}`,
     ].join('\n');
   }

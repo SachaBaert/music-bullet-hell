@@ -20,7 +20,19 @@ import { BeatGrid, METRIC_LIGHT, METRIC_STRONG, maskFromShare, nearestDistance, 
 import { rngFor } from './rng';
 
 export const ARENA = { w: 600, h: 800 } as const;
+/**
+ * Nominal aim point: where the player usually sits. Spawn times are planned for this distance;
+ * at runtime aimed patterns re-aim at the player's actual position (see resolveAim()).
+ */
 export const TARGET = { x: 300, y: 640 } as const;
+/** Kinds that aim at the player. Spirals stay locked to the bar instead. */
+export const AIMED: Record<EventKind, boolean> = { ring: true, burst: true, spiral: false, stream: true };
+/**
+ * Runtime speed scale range for aimed patterns. Spawn time is fixed by the plan, so to still land on
+ * the beat at the player's position the speed scales with (distance to player) / (nominal distance).
+ * Outside this range the pattern arrives a little early/late instead of becoming absurdly slow/fast.
+ */
+export const AIM_SCALE: [number, number] = [0.55, 1.6];
 
 export type EventKind = 'ring' | 'burst' | 'spiral' | 'stream';
 export const KINDS: EventKind[] = ['ring', 'burst', 'spiral', 'stream'];
@@ -40,6 +52,10 @@ export interface PlanEvent {
   section: number;
   /** Density 0..1 used for this event (energy scaled by difficulty). */
   density: number;
+  /** True if the pattern re-aims at the player at spawn time (rings, bursts, streams). */
+  aimed: boolean;
+  /** Nominal emitter → TARGET distance the spawn time was planned for. */
+  dist: number;
 }
 
 export interface SectionStyle {
@@ -76,6 +92,12 @@ export interface Bullets {
   r: Float32Array;
   /** Index into KINDS. */
   kind: Uint8Array;
+  /** Index into plan.events. */
+  ev: Int32Array;
+  /** Direction relative to the aim direction (emitter → aim point), radians. */
+  ang: Float32Array;
+  /** Nominal speed, px/s (scaled at runtime for aimed events). */
+  spd: Float32Array;
 }
 
 export interface Plan {
@@ -96,7 +118,32 @@ export interface Plan {
 export interface PlanOptions {
   /** 0..1, the ceiling on density and speed. Default 0.7. */
   difficulty?: number;
+  /** Multiplier on the overall density level (playtest knob, default 1). */
+  density?: number;
+  /** Override layer tuning (experiments and the tuning report). */
+  tuning?: Partial<Tuning>;
 }
+
+/** Per-layer knobs that set how the bullet budget is shared between layers. */
+export interface Tuning {
+  /** Bullets per ring at density 0 → 1. */
+  ringMin: number;
+  ringMax: number;
+  /** Max rings per bar (on the kick mask). */
+  ringsPerBar: number;
+  /** Density multiplier per layer, applied on top of the lead/non-lead weighting. */
+  kick: number;
+  mid: number;
+  hat: number;
+}
+/**
+ * Set in milestone 3 with a player and dodging bots on the test tracks (design doc §11.2):
+ * rings were 63 % of all bullets but mostly fly away from the player, so the budget moved from
+ * rings (8–22 → 8–16 bullets, max 4 → 3 per bar) to the layers that aim at the player.
+ */
+export const TUNING: Tuning = { ringMin: 8, ringMax: 16, ringsPerBar: 3, kick: 1, mid: 1.25, hat: 1.25 };
+/** Overall density level (milestone 3): ×1.1 keeps bullets/s at normal where 2b left them, with less ring share. */
+export const LEVEL = 1.1;
 
 const SPEED: Record<EventKind, [number, number]> = {
   ring: [120, 210],
@@ -131,10 +178,12 @@ const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
 const lerp = (a: number, b: number, f: number) => a + (b - a) * f;
 const TAU = Math.PI * 2;
 
-interface RawBullet { t0: number; t1: number; x0: number; y0: number; vx: number; vy: number; r: number; kind: number }
+interface RawBullet { t0: number; t1: number; x0: number; y0: number; vx: number; vy: number; r: number; kind: number; ev: number; ang: number; spd: number }
 
 export function generatePlan(chart: Chart, opts: PlanOptions = {}): Plan {
   const difficulty = clamp01(opts.difficulty ?? 0.7);
+  const densityMul = Math.max(0, opts.density ?? 1);
+  const tune: Tuning = { ...TUNING, ...opts.tuning };
   const hash = chart.meta.fileHash || 'no-hash';
   const { curves } = chart;
   const dur = chart.meta.durationSec;
@@ -253,8 +302,8 @@ export function generatePlan(chart: Chart, opts: PlanOptions = {}): Plan {
     const style = sectionAt(t);
     const inDrop = dropWindows.some((w) => t >= w.start && t < w.end);
     const cap = inDrop ? 1 : style.cap;
-    const lead = layer == null || layer === style.lead ? 1 : NON_LEAD;
-    return clamp01((at(curves.energy, t) - 0.15) / 0.75) * cap * phrase(t, style) * lead * (0.4 + 0.6 * difficulty) * modeScale;
+    const lead = (layer == null || layer === style.lead ? 1 : NON_LEAD) * (layer ? tune[layer] : 1);
+    return clamp01(clamp01((at(curves.energy, t) - 0.15) / 0.75) * cap * phrase(t, style) * lead * (0.4 + 0.6 * difficulty) * modeScale * LEVEL * densityMul);
   };
 
   // ---------------------------------------------------------------- emitters → bullets
@@ -280,18 +329,23 @@ export function generatePlan(chart: Chart, opts: PlanOptions = {}): Plan {
     const spawn = arrival - dist / speed;
     if (spawn < MIN_SPAWN || arrival > dur) return false;
     const k = KINDS.indexOf(kind);
+    const aimed = AIMED[kind];
+    const aim = aimFrom(E);
+    const id = events.length;
     for (const a of angles) {
       const vx = Math.cos(a) * speed, vy = Math.sin(a) * speed;
-      raw.push({ t0: spawn, t1: spawn + exitTime(E.x, E.y, vx, vy), x0: E.x, y0: E.y, vx, vy, r: RADIUS[kind], kind: k });
+      // aimed bullets can be slowed down at runtime, so their lifetime is an upper bound (the view culls off-screen)
+      const life = aimed ? Math.min(12, Math.hypot(ARENA.w, ARENA.h) / (speed * AIM_SCALE[0])) : exitTime(E.x, E.y, vx, vy);
+      raw.push({ t0: spawn, t1: spawn + life, x0: E.x, y0: E.y, vx, vy, r: RADIUS[kind], kind: k, ev: id, ang: a - aim, spd: speed });
     }
-    events.push({ kind, arrival, spawn, x: E.x, y: E.y, count: angles.length, section: style.index, density: d });
+    events.push({ kind, arrival, spawn, x: E.x, y: E.y, count: angles.length, section: style.index, density: d, aimed, dist });
     return true;
   };
   const aimFrom = (E: Point) => Math.atan2(TARGET.y - E.y, TARGET.x - E.x);
   const speedOf = (kind: EventKind, d: number) => lerp(SPEED[kind][0], SPEED[kind][1], d);
 
   const ring = (style: SectionStyle, t: number, d: number, breather: boolean) => {
-    const n = breather ? 6 : Math.round(lerp(8, 22, d));
+    const n = breather ? 6 : Math.round(lerp(tune.ringMin, tune.ringMax, d));
     const c = counter(style.index);
     const off = style.ringOffset === 'aimed' ? 0 : style.ringOffset === 'split' ? 0.5 : (c.ring % 2) * 0.5;
     const aim = aimFrom(style.ringEmitter);
@@ -347,7 +401,7 @@ export function generatePlan(chart: Chart, opts: PlanOptions = {}): Plan {
         if (k === 0 && bar % 2 === 0 && at(curves.energy, t) > 0.02) ring(style, t, 0, true);
       } else {
         const d = density(t, 'kick');
-        const allowed = d < 0.25 ? 1 : d < 0.5 ? 2 : d < 0.75 ? 3 : 4;
+        const allowed = Math.min(tune.ringsPerBar, d < 0.25 ? 1 : d < 0.5 ? 2 : d < 0.75 ? 3 : 4);
         const rank = style.masks.low.indexOf(k);
         const kickHere = nearestDistance(chart.onsets.low, t) < tol || at(curves.low, t) > 0.6;
         if (rank >= 0 && rank < allowed && kickHere && at(curves.low, t) > GATE.low) ring(style, t, d, false);
@@ -394,6 +448,11 @@ export function generatePlan(chart: Chart, opts: PlanOptions = {}): Plan {
   }
 
   // ---------------------------------------------------------------- pack
+  // events are sorted by arrival; remap the bullets' event indices
+  const order = events.map((_, i) => i).sort((a, b) => events[a].arrival - events[b].arrival || a - b);
+  const newIndex = new Int32Array(events.length);
+  order.forEach((old, i) => { newIndex[old] = i; });
+  const sortedEvents = order.map((i) => events[i]);
   raw.sort((a, b) => a.t0 - b.t0);
   const n = raw.length;
   const bullets: Bullets = {
@@ -402,6 +461,7 @@ export function generatePlan(chart: Chart, opts: PlanOptions = {}): Plan {
     x0: new Float32Array(n), y0: new Float32Array(n),
     vx: new Float32Array(n), vy: new Float32Array(n),
     r: new Float32Array(n), kind: new Uint8Array(n),
+    ev: new Int32Array(n), ang: new Float32Array(n), spd: new Float32Array(n),
   };
   let maxLife = 0;
   raw.forEach((b, i) => {
@@ -409,11 +469,10 @@ export function generatePlan(chart: Chart, opts: PlanOptions = {}): Plan {
     bullets.x0[i] = b.x0; bullets.y0[i] = b.y0;
     bullets.vx[i] = b.vx; bullets.vy[i] = b.vy;
     bullets.r[i] = b.r; bullets.kind[i] = b.kind;
+    bullets.ev[i] = newIndex[b.ev]; bullets.ang[i] = b.ang; bullets.spd[i] = b.spd;
     maxLife = Math.max(maxLife, b.t1 - b.t0);
   });
-  events.sort((a, b) => a.arrival - b.arrival);
-
-  return { arena: ARENA, target: TARGET, mode: chart.mode, difficulty, events, bullets, sections, breathers, maxLife };
+  return { arena: ARENA, target: TARGET, mode: chart.mode, difficulty, events: sortedEvents, bullets, sections, breathers, maxLife };
 }
 
 /** Stream emitter position at time t (it sways on a bar-locked period). */
@@ -424,3 +483,27 @@ export function streamEmitterAt(style: SectionStyle, t: number): Point {
   };
 }
 
+
+/** All emitters of a section at time t (for rendering and for player shots). */
+export function emittersOf(style: SectionStyle, t: number): { kind: EventKind; key: string; x: number; y: number }[] {
+  const out: { kind: EventKind; key: string; x: number; y: number }[] = [{ kind: 'ring', key: 'ring', ...style.ringEmitter }];
+  if (style.midStyle === 'burst') style.midEmitters.forEach((e, i) => out.push({ kind: 'burst', key: `burst${i}`, x: e.x, y: e.y }));
+  else out.push({ kind: 'spiral', key: 'spiral', x: style.spiral.x, y: style.spiral.y });
+  out.push({ kind: 'stream', key: 'stream', ...streamEmitterAt(style, t) });
+  return out;
+}
+
+/** Runtime aim of one event: absolute aim angle and speed scale. */
+export interface Aim { angle: number; scale: number }
+
+/**
+ * Aim an event at point P (the player's position at spawn time). The spawn time stays as planned;
+ * the speed scales so the pattern still reaches P's distance exactly on its beat (within AIM_SCALE).
+ */
+export function resolveAim(ev: PlanEvent, px: number, py: number): Aim {
+  if (!ev.aimed) return { angle: 0, scale: 1 };
+  const dx = px - ev.x, dy = py - ev.y;
+  const d = Math.hypot(dx, dy);
+  const angle = d < 1 ? Math.atan2(TARGET.y - ev.y, TARGET.x - ev.x) : Math.atan2(dy, dx);
+  return { angle, scale: Math.min(AIM_SCALE[1], Math.max(AIM_SCALE[0], d / ev.dist)) };
+}

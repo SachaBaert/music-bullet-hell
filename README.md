@@ -5,17 +5,26 @@ Bring your own MP3s: each song is analyzed locally, before playback, into a **ch
 
 **Live:** https://sachabaert.github.io/music-bullet-hell/
 
-## Status: milestone 2, emitters
+## Status: milestone 3, player
 
 Two views share one loaded track (switch with the tabs or **G**):
 
-**Game** (milestone 2): the chart drives enemy emitters. No player yet; a static target dot marks where patterns aim.
+**Game** (milestones 2–3): the chart drives enemy emitters, and you fly a ship through them.
+
+- **Move** with WASD or the arrow keys (physical keys, so ZQSD on AZERTY), or drag with mouse/touch (relative, like mobile shmups).
+  **Shift** = focus: slower, hitbox and graze radius shown
+- **Fire**: hold J, K or Z (or keep the pointer down). One volley per 16th note of the beat grid (fallback mode: 8 per second).
+  Shots hit the emitters (counter only for now)
+- Tiny hitbox; **graze** when bullets pass close (fills the meter at the bottom); a **hit** gives 1.6 s of invulnerability.
+  No health or game over yet. **R** restarts, **PgUp/PgDn** seek, **I** debug
+- Kick rings, bursts and streams **aim at where you are when they spawn**, and still land on their beat
+- **Density ×** field: playtest knob on the overall level (1 = default)
 
 - **kick → rings** from the top emitter, **mids → aimed bursts or a spiral** (picked per section), **hats → one stream** on the song's regularized hat sub-rhythm
 - every pattern is scheduled backwards from its beat so it **arrives on the beat**; the target pulses on each arrival
 - density and speed follow the per-track **energy**; quiet parts are **breathers**
 - patterns are seeded with `chart.meta.fileHash`: the same file always plays the same way
-- **Debug curves** (**D**) draws energy/low/mid/high/novelty under the arena, with the beat grid, breathers, sections, drops and every scheduled arrival as a tick that crosses the now line when it lands
+- **Debug** (**I**) draws energy/low/mid/high/novelty under the arena, with the beat grid, breathers, sections, drops and every scheduled arrival as a tick that crosses the now line when it lands
 
 **Viewer** (milestone 1): drop an audio file and you get
 
@@ -40,7 +49,9 @@ src/viewer/viewer.ts     PixiJS renderer (overview strip + zoomable lanes, chunk
 src/game/patterns.ts     Pure, seeded pattern generator: Chart → Plan (events + bullets)
 src/game/grid.ts         Beat grid with 16th subdivisions, per-band rhythm masks
 src/game/rng.ts          Seeded PRNG streams derived from the file hash
-src/game/game.ts         PixiJS game view: emitters, bullets, target, debug overlay
+src/game/play.ts         Player rules (pure): movement, aim at spawn, swept collisions, graze, beat auto-fire
+src/game/input.ts        Keyboard + pointer input
+src/game/game.ts         PixiJS game view: emitters, bullets, player, HUD, debug overlay
 tests/                   Synthetic tracks with known ground truth (vitest)
 ```
 
@@ -71,12 +82,23 @@ Density = per-track energy × a section ceiling (by the section's energy rank in
 the full ceiling) × an 8-bar phrase envelope (lighter first half, a breath on bar 8) × a lead-layer weight (each section
 features kick, mids or hats and thins the other two).
 
+### Player and aiming (milestone 3)
+
+The plan stays deterministic. Aimed events (rings, bursts, streams) store each bullet's angle *relative to the aim direction*;
+when the event spawns, `PlayState` records the player's position at that moment and the event fires at it, with its speed scaled
+(×0.55–1.6) so it still reaches that point exactly on its beat. Bullet positions remain a pure function of (song time, recorded aim):
+pausing just works, and a seek only forgets the aims of events that haven't spawned yet. Collisions are swept per frame, so fast
+bullets can't tunnel through the 2.5 px hitbox.
+
+The tuning report also runs three bots through `PlayState` on every track (expert, casual with 200 ms lag, purely reactive) and prints
+hits per minute and which kind of bullet caused them. They are relative measures for comparing generator changes, not ground truth.
+
 ## Develop
 
 ```bash
 npm install
 npm run dev     # http://localhost:5173/music-bullet-hell/
-npm test        # analysis + pattern tests on synthetic tracks
+npm test        # analysis, pattern and player tests on synthetic tracks
 REAL_TRACKS_DIR=~/music/test-set npx vitest run tests/realtracks.test.ts   # tuning report on real audio (needs ffmpeg)
 npm run build
 ```

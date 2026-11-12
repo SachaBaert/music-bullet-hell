@@ -11,7 +11,7 @@
       <div class="brand">
         <span class="dot"></span>
         <strong>Music Bullet Hell</strong>
-        <span class="muted">milestone 2 · emitters</span>
+        <span class="muted">milestone 3 · player</span>
       </div>
       <nav class="tabs" role="tablist">
         <button id="tab-viewer" class="tab" role="tab">Viewer</button>
@@ -48,7 +48,7 @@
       <span id="now" class="now"></span>
       <span class="spacer"></span>
       <label class="toggle"><input type="checkbox" id="click" /> Click track</label>
-      <label class="toggle game-only"><input type="checkbox" id="debug" /> Debug curves</label>
+      <label class="toggle game-only"><input type="checkbox" id="debug" /> Debug (I)</label>
       <label class="field game-only">Difficulty
         <select id="difficulty" class="num">
           <option value="0.4">easy</option>
@@ -56,11 +56,12 @@
           <option value="1">hard</option>
         </select>
       </label>
+      <label class="field game-only" title="Playtest knob: multiplies the overall density level">Density × <input type="number" id="density" value="1" min="0.2" max="3" step="0.1" class="num" /></label>
       <label class="field viewer-only">Zoom <input type="range" id="zoom" min="3" max="60" step="1" value="12" /> <span id="zoom-label" class="mono">12 s</span></label>
       <label class="field">A/V offset <input type="number" id="offset" value="0" step="10" class="num" /> ms</label>
       <button id="export" class="btn ghost">Export chart JSON</button>
     </footer>
-    <div class="hint muted">Space play/pause · ←/→ seek 5 s · G viewer/game · C click track · <span class="viewer-only">wheel or +/− zoom · click/drag to seek</span><span class="game-only">D debug curves</span></div>
+    <div class="hint muted">Space play/pause · G viewer/game · C click track · <span class="viewer-only">←/→ seek 5 s · wheel or +/− zoom · click/drag to seek</span><span class="game-only">WASD/arrows move · Shift focus · hold J/K/Z (or drag) to fire · PgUp/PgDn seek 5 s · R restart · I debug</span></div>
 
     <script type="module" src="/src/main.ts"></script>
   </body>
