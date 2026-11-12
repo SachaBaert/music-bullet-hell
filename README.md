@@ -63,7 +63,13 @@ The generator picks the **arrival** time first (a 16th-note grid step, or an ons
 from the distance and speed. The game view just asks "which bullets are alive at t?" each frame, so seeking and pausing need no simulation.
 
 Per section, each band gets a **rhythm mask**: how often each 16th position in the bar carries an onset of that band.
-Steps that recur in ≥ 25–30 % of bars form the band's sub-rhythm; energy decides how many of them (strongest first) actually fire.
+A step counts if it recurs in enough bars *and* nearly as often as the band's strongest step, ranked with a metric weight
+(downbeat > beat > 8th > 16th) and capped (kick 4, mids 4, hats 6). Mid onsets that coincide with a low onset are ignored
+for the mid rhythm (that's the kick's click), so snares show up as the backbeat. Energy decides how many steps actually fire.
+
+Density = per-track energy × a section ceiling (by the section's energy rank in the song; the first 8 bars after a drop get
+the full ceiling) × an 8-bar phrase envelope (lighter first half, a breath on bar 8) × a lead-layer weight (each section
+features kick, mids or hats and thins the other two).
 
 ## Develop
 
@@ -71,6 +77,7 @@ Steps that recur in ≥ 25–30 % of bars form the band's sub-rhythm; energy dec
 npm install
 npm run dev     # http://localhost:5173/music-bullet-hell/
 npm test        # analysis + pattern tests on synthetic tracks
+REAL_TRACKS_DIR=~/music/test-set npx vitest run tests/realtracks.test.ts   # tuning report on real audio (needs ffmpeg)
 npm run build
 ```
 

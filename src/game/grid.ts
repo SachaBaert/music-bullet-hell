@@ -97,20 +97,37 @@ export function rhythmShare(grid: BeatGrid, onsets: number[], start: number, end
     const t = grid.stepTime(s);
     if (t >= end) break;
     const k = grid.stepInBar(s);
-    const tol = Math.min(0.045, 0.35 * grid.stepDur(s));
+    // Tight window: with ~5 onsets/s per band in a real mix, a ±45 ms window already "hits" a
+    // random step about a third of the time. ±30 ms keeps chance hits near a quarter.
+    const tol = Math.min(0.03, 0.25 * grid.stepDur(s));
     seen[k]++;
     if (nearestDistance(onsets, t) < tol) hits[k]++;
   }
   return { share: hits.map((h, k) => (seen[k] ? h / seen[k] : 0)), bars: Math.min(...seen) };
 }
 
-/** Steps whose share is at least `minShare`, strongest first, at most `max` of them. */
-export function maskFromShare(share: number[], minShare: number, max: number): number[] {
-  return share
+/**
+ * Steps whose share is at least `minShare` AND at least `rel` × the strongest step's share,
+ * at most `max` of them. The relative part matters on real mixes: with 4–6 onsets/s per band
+ * almost every step clears a fixed threshold, so only "nearly as regular as the main hit" counts.
+ */
+export function maskFromShare(share: number[], minShare: number, max: number, rel = 0, metric: readonly number[] = FLAT): number[] {
+  // Rank by share weighted by metric position, so that among near-equal steps the quarter notes win
+  // over offbeat 8ths, and those over 16ths (a kick on 1 and 3 beats a bass note on the "and").
+  const score = share.map((v, k) => v * metric[k % 4]);
+  const best = Math.max(0, ...score);
+  const threshold = Math.max(minShare, rel * best);
+  return score
     .map((v, k) => ({ v, k }))
-    .filter((x) => x.v >= minShare)
+    .filter((x) => share[x.k] >= minShare && x.v >= threshold)
     .sort((a, b) => b.v - a.v || a.k - b.k)
     .slice(0, max)
-    .map((x) => x.k)
-    .sort((a, b) => a - b);
+    .map((x) => x.k);
 }
+
+/** Weights for the 4 sixteenth positions within a beat (on the beat, "e", "and", "a"). */
+export const FLAT = [1, 1, 1, 1] as const;
+export const METRIC_STRONG = [1, 0.7, 0.85, 0.7] as const;
+export const METRIC_LIGHT = [1, 0.85, 0.95, 0.85] as const;
+
+

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { analyze } from '../src/analysis/analyze';
 import { sampleCurve, type Chart } from '../src/chart/types';
-import { BeatGrid } from '../src/game/grid';
+import { BeatGrid, METRIC_STRONG, maskFromShare } from '../src/game/grid';
 import { KINDS, TARGET, generatePlan, type Plan } from '../src/game/patterns';
 import { SR, ambientTrack, edmTrack, hiphopTrack } from './synth';
 
@@ -120,5 +120,15 @@ describe('generatePlan()', () => {
     console.log('ambient events', plan.events.length, 'bullets', plan.bullets.count);
     expect(plan.events.every((e) => e.kind !== 'spiral' && e.spawn > 0)).toBe(true);
     expect(plan.bullets.count / chart.meta.durationSec).toBeLessThan(8);
+  });
+
+  it('rhythm masks: relative threshold, and quarters beat offbeats when shares are close', () => {
+    // 8th-note bass: every 8th has a high share, offbeats slightly higher. Kick mask should be the quarters.
+    const share = Array.from({ length: 16 }, (_, k) => (k % 4 === 0 ? 0.8 : k % 2 === 0 ? 0.88 : 0.3));
+    expect(maskFromShare(share, 0.35, 4, 0.7, METRIC_STRONG)).toEqual([0, 4, 8, 12]);
+    // a uniform "everything hits" share passes only up to the cap
+    expect(maskFromShare(new Array(16).fill(0.9), 0.35, 4, 0.7, METRIC_STRONG)).toHaveLength(4);
+    // weak steps below the relative threshold are dropped even if above the absolute one
+    expect(maskFromShare([1, 0, 0, 0, 0.5, 0, 0, 0, 1, 0, 0, 0, 0.5, 0, 0, 0], 0.35, 4, 0.7)).toEqual([0, 8]);
   });
 });

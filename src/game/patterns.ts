@@ -16,7 +16,7 @@
  *  - quiet / very low energy → breathers: only a sparse, slow ring every other bar
  */
 import { sampleCurve, type Chart, type Span } from '../chart/types';
-import { BeatGrid, maskFromShare, nearestDistance, rhythmShare } from './grid';
+import { BeatGrid, METRIC_LIGHT, METRIC_STRONG, maskFromShare, nearestDistance, rhythmShare } from './grid';
 import { rngFor } from './rng';
 
 export const ARENA = { w: 600, h: 800 } as const;
@@ -56,7 +56,13 @@ export interface SectionStyle {
   stream: { cx: number; y: number; amp: number; periodSec: number; phase: number };
   /** Sixteenth positions (0..15) used per band in this section; empty in fallback mode. */
   masks: { low: number[]; mid: number[]; high: number[] };
+  /** Density ceiling for this section (0..1), from its energy rank within the song. Drops lift it to 1. */
+  cap: number;
+  /** The layer this section features; the other two are thinned. */
+  lead: Layer;
 }
+
+export type Layer = 'kick' | 'mid' | 'hat';
 
 /** Struct-of-arrays, sorted by spawn time t0. */
 export interface Bullets {
@@ -100,11 +106,24 @@ const SPEED: Record<EventKind, [number, number]> = {
 };
 const RADIUS: Record<EventKind, number> = { ring: 9, burst: 6, spiral: 5.5, stream: 3.5 };
 
+/** Rhythm mask selection per band: absolute minimum share, share relative to the strongest step, max steps. */
+const MASK = {
+  low: { min: 0.35, rel: 0.7, max: 4 },
+  mid: { min: 0.3, rel: 0.65, max: 4 },
+  high: { min: 0.25, rel: 0.6, max: 6 },
+};
 /** Band must be at least this loud (per-track normalized) for its layer to fire. */
 const GATE = { low: 0.3, mid: 0.3, high: 0.35 };
 /** Below this normalized energy we treat the music as a breather even outside detected quiet spans. */
 const BREATHER_ENERGY = 0.12;
 const BREATHER_MIN_SEC = 1.5;
+/** Density ceiling range across sections, quietest → loudest section of the song (drops get 1). */
+const SECTION_CAP: [number, number] = [0.55, 0.85];
+const DROP_MIN_INTENSITY = 0.35;
+const DROP_BARS = 8;
+const PHRASE = { firstHalf: 0.9, breath: 0.6 };
+/** Density multiplier for the two layers a section does not feature. */
+const NON_LEAD = 0.75;
 /** Don't spawn anything this close to the song start. */
 const MIN_SPAWN = 0.05;
 
@@ -123,7 +142,6 @@ export function generatePlan(chart: Chart, opts: PlanOptions = {}): Plan {
 
   // Without a trustworthy grid the onsets are noisier too, so fallback mode plays it calmer.
   const modeScale = chart.mode === 'fallback' ? 0.6 : 1;
-  const density = (t: number) => clamp01((at(curves.energy, t) - 0.15) / 0.75) * (0.5 + 0.5 * difficulty) * modeScale;
   // Breathers = detected quiet spans + sustained (>= BREATHER_MIN_SEC) very low energy.
   // Short dips between hits don't count, otherwise sparse grooves would flicker in and out.
   const breathers: Span[] = chart.quiet.map((q) => ({ ...q }));
@@ -148,30 +166,43 @@ export function generatePlan(chart: Chart, opts: PlanOptions = {}): Plan {
   const barSec = grid && chart.tempo ? (60 / chart.tempo.bpm) * grid.beatsPerBar : 2;
 
   // ---------------------------------------------------------------- per-section styles
+  // A kick's click also lands in the mid band, so "mid on every beat" is usually just the kick.
+  // For the mid rhythm, count only mid onsets that don't coincide with a low onset (if enough remain).
+  const midOnly = chart.onsets.mid.filter((t) => nearestDistance(chart.onsets.low, t) > 0.03);
+  const midOnsets = midOnly.length >= 0.25 * chart.onsets.mid.length ? midOnly : chart.onsets.mid;
+  const bandOnsets = { low: chart.onsets.low, mid: midOnsets, high: chart.onsets.high };
   const globalShare = grid
     ? {
-        low: rhythmShare(grid, chart.onsets.low, 0, dur).share,
-        mid: rhythmShare(grid, chart.onsets.mid, 0, dur).share,
-        high: rhythmShare(grid, chart.onsets.high, 0, dur).share,
+        low: rhythmShare(grid, bandOnsets.low, 0, dur).share,
+        mid: rhythmShare(grid, bandOnsets.mid, 0, dur).share,
+        high: rhythmShare(grid, bandOnsets.high, 0, dur).share,
       }
     : null;
 
+  // Section energy rank → density ceiling. Per-track normalization puts every loud part of a loud
+  // master near energy 1, so without this a loud song plays at full density from start to end.
+  const rankable = chart.sections.filter((s) => s.end - s.start >= 4);
+  const rankOf = (e: number) => (rankable.length < 2 ? 1 : rankable.filter((s) => s.energy < e - 1e-6).length / (rankable.length - 1));
+  let prevLead: Layer | null = null;
+
   const sections: SectionStyle[] = chart.sections.map((sec) => {
     const rng = rngFor(hash, `s${sec.index}:style`);
+    const leadRng = rngFor(hash, `s${sec.index}:lead`);
+    const lead: Layer = leadRng.pick((['kick', 'mid', 'hat'] as const).filter((l) => l !== prevLead));
+    prevLead = lead;
     let masks = { low: [] as number[], mid: [] as number[], high: [] as number[] };
     if (grid && globalShare) {
-      const pick = (band: 'low' | 'mid' | 'high', minShare: number, max: number, fallback: number[]) => {
-        const local = rhythmShare(grid, chart.onsets[band], sec.start, sec.end);
+      const pick = (band: 'low' | 'mid' | 'high', minShare: number, rel: number, max: number, fallback: number[]) => {
+        const local = rhythmShare(grid, bandOnsets[band], sec.start, sec.end);
         const share = local.bars >= 2 ? local.share : globalShare[band];
-        const m = maskFromShare(share, minShare, max);
-        // order by strength so density can keep "the most important" steps first
-        const ranked = m.slice().sort((a, b) => share[b] - share[a] || a - b);
-        return ranked.length ? ranked : fallback;
+        // strongest first, so density can keep "the most important" steps first
+        const m = maskFromShare(share, minShare, max, rel, band === 'high' ? METRIC_LIGHT : METRIC_STRONG);
+        return m.length ? m : fallback;
       };
       masks = {
-        low: pick('low', 0.3, 8, [0, 8]),
-        mid: pick('mid', 0.3, 6, [4, 12]),
-        high: pick('high', 0.25, 8, [2, 6, 10, 14]),
+        low: pick('low', MASK.low.min, MASK.low.rel, MASK.low.max, [0, 8]),
+        mid: pick('mid', MASK.mid.min, MASK.mid.rel, MASK.mid.max, [4, 12]),
+        high: pick('high', MASK.high.min, MASK.high.rel, MASK.high.max, [2, 6, 10, 14]),
       };
     }
     const xL = rng.range(70, 150);
@@ -197,11 +228,33 @@ export function generatePlan(chart: Chart, opts: PlanOptions = {}): Plan {
       },
       stream: { cx: ARENA.w / 2, y: rng.range(55, 90), amp: rng.range(120, 220), periodSec: barSec * rng.pick([1, 2, 4]), phase: rng.range(0, TAU) },
       masks,
+      cap: lerp(SECTION_CAP[0], SECTION_CAP[1], clamp01(rankOf(sec.energy))),
+      lead,
     } satisfies SectionStyle;
   });
   const sectionAt = (t: number) => {
     for (let i = sections.length - 1; i >= 0; i--) if (t >= sections[i].start) return sections[i];
     return sections[0];
+  };
+
+  // ---------------------------------------------------------------- density shape
+  // Top density is reserved for the first bars after a drop.
+  const dropWindows: Span[] = chart.drops
+    .filter((d) => d.intensity >= DROP_MIN_INTENSITY)
+    .map((d) => ({ start: d.t, end: d.t + DROP_BARS * barSec }));
+  const beatPos = (t: number) => (grid ? grid.beatPos(t) : t / (barSec / 4));
+  /** Phrase envelope over 8-bar phrases counted from the section start: lighter first half, a breath on bar 8. */
+  const phrase = (t: number, style: SectionStyle) => {
+    const bar = Math.floor((beatPos(t) - beatPos(style.start)) / (grid?.beatsPerBar ?? 4) + 1e-6);
+    const pos = ((bar % 8) + 8) % 8;
+    return pos === 7 ? PHRASE.breath : pos < 4 ? PHRASE.firstHalf : 1;
+  };
+  const density = (t: number, layer?: Layer) => {
+    const style = sectionAt(t);
+    const inDrop = dropWindows.some((w) => t >= w.start && t < w.end);
+    const cap = inDrop ? 1 : style.cap;
+    const lead = layer == null || layer === style.lead ? 1 : NON_LEAD;
+    return clamp01((at(curves.energy, t) - 0.15) / 0.75) * cap * phrase(t, style) * lead * (0.4 + 0.6 * difficulty) * modeScale;
   };
 
   // ---------------------------------------------------------------- emitters → bullets
@@ -286,7 +339,6 @@ export function generatePlan(chart: Chart, opts: PlanOptions = {}): Plan {
       const style = sectionAt(t);
       const k = grid.stepInBar(s);
       const bar = grid.barOf(s);
-      const d = density(t);
       const breather = isBreather(t);
       const tol = Math.min(0.045, 0.35 * grid.stepDur(s));
 
@@ -294,7 +346,8 @@ export function generatePlan(chart: Chart, opts: PlanOptions = {}): Plan {
       if (breather) {
         if (k === 0 && bar % 2 === 0 && at(curves.energy, t) > 0.02) ring(style, t, 0, true);
       } else {
-        const allowed = d < 0.3 ? 1 : d < 0.6 ? 2 : 4;
+        const d = density(t, 'kick');
+        const allowed = d < 0.25 ? 1 : d < 0.5 ? 2 : d < 0.75 ? 3 : 4;
         const rank = style.masks.low.indexOf(k);
         const kickHere = nearestDistance(chart.onsets.low, t) < tol || at(curves.low, t) > 0.6;
         if (rank >= 0 && rank < allowed && kickHere && at(curves.low, t) > GATE.low) ring(style, t, d, false);
@@ -303,8 +356,9 @@ export function generatePlan(chart: Chart, opts: PlanOptions = {}): Plan {
 
       // Mids → aimed bursts on the snare positions, or a spiral quantized to the grid.
       if (at(curves.mid, t) > GATE.mid) {
+        const d = density(t, 'mid');
         if (style.midStyle === 'burst') {
-          const allowed = d < 0.3 ? 1 : d < 0.6 ? 2 : 6;
+          const allowed = d < 0.25 ? 1 : d < 0.5 ? 2 : d < 0.75 ? 3 : 4;
           const rank = style.masks.mid.indexOf(k);
           if (rank >= 0 && rank < allowed) burst(style, t, d);
         } else if (k % (d < 0.45 ? 4 : 2) === 0) {
@@ -314,6 +368,7 @@ export function generatePlan(chart: Chart, opts: PlanOptions = {}): Plan {
 
       // Highs → one stream on the regularized hat sub-rhythm, thinned by energy.
       if (at(curves.high, t) > GATE.high) {
+        const d = density(t, 'hat');
         const m = style.masks.high;
         const allowed = Math.ceil(m.length * (0.35 + 0.65 * d));
         const rank = m.indexOf(k);
@@ -322,10 +377,10 @@ export function generatePlan(chart: Chart, opts: PlanOptions = {}): Plan {
     }
   } else {
     // Fallback: no beat grid. Follow onsets directly, thinned by a minimum gap that shrinks with energy.
-    const follow = (onsets: number[], gap: (d: number, breather: boolean) => number, gate: number, curve: Float32Array, emit: (style: SectionStyle, t: number, d: number, breather: boolean) => void) => {
+    const follow = (layer: Layer, onsets: number[], gap: (d: number, breather: boolean) => number, gate: number, curve: Float32Array, emit: (style: SectionStyle, t: number, d: number, breather: boolean) => void) => {
       let last = -Infinity;
       for (const t of onsets) {
-        const d = density(t);
+        const d = density(t, layer);
         const breather = isBreather(t);
         const g = gap(d, breather);
         if (!Number.isFinite(g) || t - last < g || at(curve, t) <= gate) continue;
@@ -333,9 +388,9 @@ export function generatePlan(chart: Chart, opts: PlanOptions = {}): Plan {
         last = t;
       }
     };
-    follow(chart.onsets.low, (d, b) => (b ? 4 : lerp(2.4, 0.8, d)), GATE.low, curves.low, (st, t, d, b) => ring(st, t, d, b));
-    follow(chart.onsets.mid, (d, b) => (b ? Infinity : lerp(3, 1, d)), GATE.mid, curves.mid, (st, t, d) => burst(st, t, d));
-    follow(chart.onsets.high, (d, b) => (b ? Infinity : lerp(1, 0.25, d)), GATE.high, curves.high, (st, t, d) => stream(st, t, d));
+    follow('kick', chart.onsets.low, (d, b) => (b ? 4 : lerp(2.4, 0.8, d)), GATE.low, curves.low, (st, t, d, b) => ring(st, t, d, b));
+    follow('mid', chart.onsets.mid, (d, b) => (b ? Infinity : lerp(3, 1, d)), GATE.mid, curves.mid, (st, t, d) => burst(st, t, d));
+    follow('hat', chart.onsets.high, (d, b) => (b ? Infinity : lerp(1, 0.25, d)), GATE.high, curves.high, (st, t, d) => stream(st, t, d));
   }
 
   // ---------------------------------------------------------------- pack

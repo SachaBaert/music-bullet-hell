@@ -304,6 +304,7 @@ export class GameView {
     const tempo = chart.tempo ? `${chart.tempo.bpm.toFixed(1)} bpm` : 'no grid';
     return [
       `§${st.index + 1}/${plan.sections.length} ${st.intensity.padEnd(4)} mids: ${st.midStyle.padEnd(6)} rings: ${st.ringOffset}`,
+      `lead ${st.lead.padEnd(4)}  cap ${st.cap.toFixed(2)}${chart.drops.some((d) => t >= d.t && t < d.t + 8 * (chart.tempo ? 240 / chart.tempo.bpm : 2)) ? '  DROP WINDOW' : ''}`,
       `kick  ${mask(st.masks.low)}`,
       `mid   ${mask(st.masks.mid)}`,
       `hat   ${mask(st.masks.high)}`,
